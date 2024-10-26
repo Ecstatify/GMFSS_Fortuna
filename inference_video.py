@@ -9,8 +9,38 @@ import warnings
 import _thread
 import skvideo.io
 from queue import Queue, Empty
+import subprocess
+import time
+from datetime import datetime
 
 warnings.filterwarnings("ignore")
+
+def get_gpu_stats():
+    """Get GPU utilization, memory usage, temperature and power consumption"""
+    try:
+        output = subprocess.check_output([
+            'nvidia-smi', 
+            '--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit',
+            '--format=csv,noheader,nounits'
+        ])
+        util, mem_used, mem_total, temp, pwr_draw, pwr_limit = map(float, output.decode('utf-8').strip().split(', '))
+        return f"GPU: {int(util)}% | Mem: {int(mem_used)}/{int(mem_total)}MB | {int(temp)}°C | PWR: {pwr_draw:.1f}/{pwr_limit:.1f}W"
+    except:
+        return "GPU stats unavailable"
+
+class GPUMonitoredProgress(tqdm):
+    """Custom progress bar with GPU monitoring"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_gpu_update = 0
+        self.gpu_update_interval = 1  # Update GPU stats every second
+
+    def update(self, n=1):
+        super().update(n)
+        current_time = time.time()
+        if current_time - self.last_gpu_update >= self.gpu_update_interval:
+            self.set_postfix_str(get_gpu_stats())
+            self.last_gpu_update = current_time
 
 def create_video_reader(video_path):
     """Custom video reader to avoid numpy float deprecation"""
@@ -25,7 +55,6 @@ def create_video_reader(video_path):
                 if not ret:
                     cap.release()
                     break
-                # Convert BGR to RGB and ensure proper memory layout
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).copy()
                 yield frame
                 
@@ -38,26 +67,20 @@ def transferAudio(sourceVideo, targetVideo):
     import moviepy.editor
     tempAudioFileName = "./temp/audio.mkv"
 
-    # split audio from original video file and store in "temp" directory
-    if True:
-        # clear old "temp" directory if it exits
-        if os.path.isdir("temp"):
-            shutil.rmtree("temp")
-        # create new "temp" directory
-        os.makedirs("temp")
-        # extract audio from video
-        os.system('ffmpeg -y -i "{}" -c:a copy -vn {}'.format(sourceVideo, tempAudioFileName))
+    if os.path.isdir("temp"):
+        shutil.rmtree("temp")
+    os.makedirs("temp")
+    os.system('ffmpeg -y -i "{}" -c:a copy -vn {}'.format(sourceVideo, tempAudioFileName))
 
     targetNoAudio = os.path.splitext(targetVideo)[0] + "_noaudio" + os.path.splitext(targetVideo)[1]
     os.rename(targetVideo, targetNoAudio)
-    # combine audio file and new video file
     os.system('ffmpeg -y -i "{}" -i {} -c copy "{}"'.format(targetNoAudio, tempAudioFileName, targetVideo))
 
-    if os.path.getsize(targetVideo) == 0: # if ffmpeg failed to merge the video and audio together try converting the audio to aac
+    if os.path.getsize(targetVideo) == 0:
         tempAudioFileName = "./temp/audio.m4a"
         os.system('ffmpeg -y -i "{}" -c:a aac -b:a 160k -vn {}'.format(sourceVideo, tempAudioFileName))
         os.system('ffmpeg -y -i "{}" -i {} -c copy "{}"'.format(targetNoAudio, tempAudioFileName, targetVideo))
-        if (os.path.getsize(targetVideo) == 0): # if aac is not supported by selected format
+        if (os.path.getsize(targetVideo) == 0):
             os.rename(targetNoAudio, targetVideo)
             print("Audio transfer failed. Interpolated video will have no audio")
         else:
@@ -66,7 +89,6 @@ def transferAudio(sourceVideo, targetVideo):
     else:
         os.remove(targetNoAudio)
 
-    # remove temp directory
     shutil.rmtree("temp")
 
 parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
@@ -221,6 +243,9 @@ def pad_image(img):
     else:
         return F.pad(img, padding)
 
+# Print initial GPU status
+print("\nInitial GPU Status:", get_gpu_stats())
+
 if args.montage:
     left = w // 4
     w = w // 2
@@ -228,7 +253,10 @@ tmp = max(64, int(64 / args.scale))
 ph = ((h - 1) // tmp + 1) * tmp
 pw = ((w - 1) // tmp + 1) * tmp
 padding = (0, pw - w, 0, ph - h)
-pbar = tqdm(total=tot_frame)
+
+# Initialize with GPU-monitored progress bar
+pbar = GPUMonitoredProgress(total=tot_frame, desc="Processing frames")
+
 if args.montage:
     lastframe = lastframe[:, left: left + w]
 write_buffer = Queue(maxsize=500)
@@ -273,10 +301,15 @@ if args.montage:
     write_buffer.put(np.concatenate((lastframe, lastframe), 1))
 else:
     write_buffer.put(lastframe)
+
 import time
 while(not write_buffer.empty()):
     time.sleep(0.1)
 pbar.close()
+
+# Print final GPU status
+print("\nFinal GPU Status:", get_gpu_stats())
+
 if not vid_out is None:
     vid_out.release()
 
