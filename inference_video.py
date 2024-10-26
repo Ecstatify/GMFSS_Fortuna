@@ -12,6 +12,27 @@ from queue import Queue, Empty
 
 warnings.filterwarnings("ignore")
 
+def create_video_reader(video_path):
+    """Custom video reader to avoid numpy float deprecation"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video file: {video_path}")
+        
+        def video_generator():
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    cap.release()
+                    break
+                # Convert BGR to RGB and ensure proper memory layout
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).copy()
+                yield frame
+                
+        return video_generator()
+    except Exception as e:
+        raise ValueError(f"Could not create video reader: {str(e)}")
+
 def transferAudio(sourceVideo, targetVideo):
     import shutil
     import moviepy.editor
@@ -19,10 +40,8 @@ def transferAudio(sourceVideo, targetVideo):
 
     # split audio from original video file and store in "temp" directory
     if True:
-
         # clear old "temp" directory if it exits
         if os.path.isdir("temp"):
-            # remove temp directory
             shutil.rmtree("temp")
         # create new "temp" directory
         os.makedirs("temp")
@@ -43,8 +62,6 @@ def transferAudio(sourceVideo, targetVideo):
             print("Audio transfer failed. Interpolated video will have no audio")
         else:
             print("Lossless audio transfer failed. Audio was transcoded to AAC (M4A) instead.")
-
-            # remove audio-less video
             os.remove(targetNoAudio)
     else:
         os.remove(targetNoAudio)
@@ -117,8 +134,13 @@ if not args.video is None:
         args.fps = fps * args.multi
     else:
         fpsNotAssigned = False
-    videogen = skvideo.io.vreader(args.video)
-    lastframe = next(videogen)
+    try:
+        videogen = create_video_reader(args.video)
+        lastframe = next(videogen)
+    except Exception as e:
+        print(f"Error reading video: {str(e)}")
+        exit(1)
+    
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     video_path_wo_ext, ext = os.path.splitext(args.video)
     print('{}.{}, {} frames in total, {}FPS to {}FPS'.format(video_path_wo_ext, args.ext, tot_frame, fps, args.fps))
@@ -133,8 +155,10 @@ else:
             videogen.append(f)
     tot_frame = len(videogen)
     videogen.sort(key= lambda x:int(x[:-4]))
-    lastframe = cv2.imread(os.path.join(args.img, videogen[0]), cv2.IMREAD_UNCHANGED)[:, :, ::-1].copy()
+    lastframe = cv2.imread(os.path.join(args.img, videogen[0]), cv2.IMREAD_UNCHANGED)
+    lastframe = cv2.cvtColor(lastframe, cv2.COLOR_BGR2RGB).copy()
     videogen = videogen[1:]
+
 h, w, _ = lastframe.shape
 vid_out_name = None
 vid_out = None
@@ -155,21 +179,22 @@ def clear_write_buffer(user_args, write_buffer):
         if item is None:
             break
         if user_args.png:
-            cv2.imwrite('vid_out/{:0>7d}.png'.format(cnt), item[:, :, ::-1])
+            cv2.imwrite('vid_out/{:0>7d}.png'.format(cnt), cv2.cvtColor(item, cv2.COLOR_RGB2BGR))
             cnt += 1
         else:
-            vid_out.write(item[:, :, ::-1])
+            vid_out.write(cv2.cvtColor(item, cv2.COLOR_RGB2BGR))
 
 def build_read_buffer(user_args, read_buffer, videogen):
     try:
         for frame in videogen:
             if not user_args.img is None:
-                frame = cv2.imread(os.path.join(user_args.img, frame))[:, :, ::-1].copy()
+                frame = cv2.imread(os.path.join(user_args.img, frame))
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).copy()
             if user_args.montage:
                 frame = frame[:, left: left + w]
             read_buffer.put(frame)
-    except:
-        pass
+    except Exception as e:
+        print(f"Error in read buffer: {str(e)}")
     read_buffer.put(None)
 
 def make_inference(I0, I1, reuse_things, n):    
@@ -213,7 +238,7 @@ _thread.start_new_thread(clear_write_buffer, (args, write_buffer))
 
 I1 = torch.from_numpy(np.transpose(lastframe, (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / 255.
 I1 = F.interpolate(I1, (ph, pw), mode='bilinear', align_corners=False)
-temp = None # save lastframe when processing static frame
+temp = None
 
 while True:
     if temp is not None:
